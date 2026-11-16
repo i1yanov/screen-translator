@@ -59,6 +59,8 @@ object TextCollector {
         // contentDescription (подписи иконок для незрячих) не берём — на экране этого текста нет
         val text = node.text?.toString()?.takeIf { it.isNotBlank() }
 
+        // перечитываем элемент заново, чтобы не взять устаревшие координаты из кэша
+        if (text != null && !node.refresh()) return
         if (text != null) {
             val r = Rect()
             node.getBoundsInScreen(r)
