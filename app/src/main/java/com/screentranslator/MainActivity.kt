@@ -72,6 +72,22 @@ class MainActivity : Activity() {
 
         // --- 3. Настройки
         root.addView(header("3. Настройки"))
+        root.addView(text("Режим:"))
+        val modes = listOf(
+            "По снимку экрана — как Google Объектив (рекомендуется)",
+            "По тексту элементов приложения (быстрее)"
+        )
+        val modeGroup = RadioGroup(this)
+        modes.forEachIndexed { i, name ->
+            modeGroup.addView(RadioButton(this).apply { id = 2000 + i; text = name; textSize = 16f })
+        }
+        modeGroup.check(2000 + Prefs.mode(prefs))
+        modeGroup.setOnCheckedChangeListener { _, checkedId ->
+            prefs.edit().putInt(Prefs.KEY_MODE, checkedId - 2000).apply()
+        }
+        root.addView(modeGroup)
+        root.addView(small("«Как Google Объектив»: переводит всё, что видно на экране, включая картинки, и рисует перевод поверх каждой строки в цветах оригинала. Перевод появляется за 1–2 секунды."))
+
         root.addView(text("Угол экрана для нажатия:"))
         val corners = listOf("Левый верхний (у часов)", "Правый верхний", "Левый нижний", "Правый нижний")
         val group = RadioGroup(this)
@@ -107,7 +123,7 @@ class MainActivity : Activity() {
             setOnCheckedChangeListener { _, c -> prefs.edit().putBoolean(Prefs.KEY_SHOW_MARK, c).apply() }
         })
         root.addView(CheckBox(this).apply {
-            text = "Распознавать текст на картинках (английский и иврит)"
+            text = "Режим элементов: также распознавать картинки"
             textSize = 16f
             isChecked = Prefs.ocr(prefs)
             setOnCheckedChangeListener { _, c -> prefs.edit().putBoolean(Prefs.KEY_OCR, c).apply() }

@@ -26,6 +26,14 @@ class OverlayView(context: Context) : View(context) {
     private val items = ArrayList<Item>()
     var message: String? = null
         set(value) { field = value; invalidate() }
+    /** затемнять экран под переводом */
+    var dim = true
+        set(value) { field = value; invalidate() }
+    /** показывать «Распознаю текст…» */
+    var busy = false
+        set(value) { field = value; invalidate() }
+
+    fun isEmpty() = items.isEmpty()
 
     private val dp = resources.displayMetrics.density
     private val sp = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 1f, resources.displayMetrics)
@@ -36,6 +44,8 @@ class OverlayView(context: Context) : View(context) {
         color = 0xFFE0B000.toInt(); style = Paint.Style.STROKE; strokeWidth = 1f * dp
     }
     private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
+    private val lensBgPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val busyPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 13f * sp }
     private val msgBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xE6202124.toInt() }
     private val msgPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 15f * sp }
 
@@ -57,8 +67,57 @@ class OverlayView(context: Context) : View(context) {
     fun occupied(): List<Rect> = items.map { it.block.bounds }
 
     fun setTranslation(item: Item, translated: String) {
-        layoutItem(item, translated)
+        if (item.block.lens) layoutLens(item, translated) else layoutItem(item, translated)
         invalidate()
+    }
+
+    /** Как Google Объектив: перевод на месте блока, размер по высоте букв, иврит — справа. */
+    private fun layoutLens(item: Item, text: String) {
+        val b = item.block
+        val r = b.bounds
+        val pad = 3 * dp
+        val screenW = maxOf(width, resources.displayMetrics.widthPixels, r.right)
+        val w0 = r.width().coerceAtLeast(1)
+        val h0 = r.height().toFloat()
+        val align = if (b.rtl) Layout.Alignment.ALIGN_OPPOSITE else Layout.Alignment.ALIGN_NORMAL
+        // высота букв оригинала ≈ 0.8 размера шрифта
+        val s0 = (b.lineHeightPx * 1.2f).coerceIn(8 * sp, screenW / 8f)
+
+        var layout: StaticLayout? = null
+        var size = s0
+        var boxW = w0
+        var left = r.left.toFloat()
+
+        for (f in floatArrayOf(1f, 0.9f, 0.8f, 0.7f, 0.62f, 0.55f)) {
+            val l = build(text, w0, s0 * f, align)
+            if (l.height <= h0 * 1.15f + 1) {
+                layout = l; size = s0 * f
+                break
+            }
+        }
+        if (layout == null && b.lineCount <= 1) {
+            val s = s0 * 0.8f
+            textPaint.textSize = s
+            val want = (textPaint.measureText(text) + 2).toInt()
+            val newW = want.coerceIn(w0, (screenW - 2 * pad).toInt().coerceAtLeast(w0))
+            val l = build(text, newW, s, align)
+            if (l.height <= h0 * 1.4f + 1) {
+                layout = l; size = s; boxW = newW
+                left = if (b.rtl) (r.right - newW).toFloat() else r.left.toFloat()
+                left = left.coerceIn(pad, (screenW - pad - newW).coerceAtLeast(pad))
+            }
+        }
+        if (layout == null) {
+            size = s0 * 0.55f
+            layout = build(text, w0, size, align)
+        }
+        val l = layout!!
+        val hShown = maxOf(h0, l.height.toFloat())
+        item.layout = l
+        item.textSize = size
+        item.drawRect.set(left - pad, r.top - pad, left + boxW + pad, r.top + hShown + pad)
+        item.textX = left
+        item.textY = r.top + (hShown - l.height) / 2f
     }
 
     /** Отношение высоты строки к размеру шрифта (для Roboto ≈ 1.17). */
@@ -166,10 +225,13 @@ class OverlayView(context: Context) : View(context) {
         item.textY = top + ((hShown - l.height) / 2f).coerceAtLeast(0f)
     }
 
-    private fun build(text: String, width: Int, size: Float): StaticLayout {
+    private fun build(
+        text: String, width: Int, size: Float,
+        align: Layout.Alignment = Layout.Alignment.ALIGN_NORMAL
+    ): StaticLayout {
         textPaint.textSize = size
         return StaticLayout.Builder.obtain(text, 0, text.length, textPaint, width.coerceAtLeast(1))
-            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+            .setAlignment(align)
             .setIncludePad(false)
             .setLineSpacing(0f, 1f)
             .build()
@@ -178,15 +240,22 @@ class OverlayView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         getLocationOnScreen(loc)
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), dimPaint)
+        if (dim) canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), dimPaint)
 
         canvas.save()
         canvas.translate(-loc[0].toFloat(), -loc[1].toFloat())
         for (item in items) {
             val layout = item.layout ?: continue
             val rect = item.drawRect
-            canvas.drawRoundRect(rect, 3 * dp, 3 * dp, bgPaint)
-            canvas.drawRoundRect(rect, 3 * dp, 3 * dp, borderPaint)
+            if (item.block.lens) {
+                lensBgPaint.color = item.block.bgColor
+                canvas.drawRoundRect(rect, 4 * dp, 4 * dp, lensBgPaint)
+                textPaint.color = item.block.fgColor
+            } else {
+                canvas.drawRoundRect(rect, 3 * dp, 3 * dp, bgPaint)
+                canvas.drawRoundRect(rect, 3 * dp, 3 * dp, borderPaint)
+                textPaint.color = Color.BLACK
+            }
             canvas.save()
             canvas.translate(item.textX, item.textY)
             textPaint.textSize = item.textSize
@@ -194,6 +263,16 @@ class OverlayView(context: Context) : View(context) {
             canvas.restore()
         }
         canvas.restore()
+
+        if (busy) {
+            val label = "Распознаю текст…"
+            val tw = busyPaint.measureText(label)
+            val cx = width / 2f
+            val cy = height * 0.9f
+            val p = 10 * dp
+            canvas.drawRoundRect(cx - tw / 2 - p, cy - 18 * dp, cx + tw / 2 + p, cy + 10 * dp, 14 * dp, 14 * dp, msgBgPaint)
+            canvas.drawText(label, cx - tw / 2, cy, busyPaint)
+        }
 
         message?.let { msg ->
             val w = (width * 0.9f).toInt()

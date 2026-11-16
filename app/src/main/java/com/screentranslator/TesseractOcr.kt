@@ -4,14 +4,16 @@ import android.content.Context
 import android.graphics.Bitmap
 import com.googlecode.tesseract.android.TessBaseAPI
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.Executors
 
 /**
- * Tesseract OCR (иврит + английский). Данные языков лежат в assets/tessdata
- * и при первом запуске копируются во внутреннюю память.
- * Tesseract не потокобезопасен — всё выполняется в одном потоке.
+ * Один экземпляр Tesseract OCR (иврит + английский) в своём потоке.
+ * Tesseract не потокобезопасен, поэтому для скорости держим несколько экземпляров (TesseractPool).
  */
 class TesseractOcr(private val ctx: Context) {
 
@@ -23,26 +25,13 @@ class TesseractOcr(private val ctx: Context) {
         api?.let { return it }
         if (failed) return null
         return try {
-            val dir = File(ctx.filesDir, "tesseract")
-            val tessdata = File(dir, "tessdata")
-            tessdata.mkdirs()
-            for (name in LANG_FILES) {
-                val f = File(tessdata, name)
-                if (!f.exists() || f.length() == 0L) {
-                    val tmp = File(tessdata, "$name.tmp")
-                    ctx.assets.open("tessdata/$name").use { input ->
-                        tmp.outputStream().use { output -> input.copyTo(output) }
-                    }
-                    tmp.renameTo(f)
-                }
-            }
+            val dir = prepareData(ctx) ?: run { failed = true; return null }
             val a = TessBaseAPI()
             if (!a.init(dir.absolutePath, "heb+eng")) {
                 a.recycle()
                 failed = true
                 null
             } else {
-                a.setPageSegMode(TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK)
                 api = a
                 a
             }
@@ -57,14 +46,18 @@ class TesseractOcr(private val ctx: Context) {
     }
 
     /** Возвращает (текст, средняя уверенность 0..100) или null. */
-    suspend fun recognize(bmp: Bitmap): Pair<String, Int>? = withContext(dispatcher) {
+    suspend fun recognize(bmp: Bitmap, singleLine: Boolean): Pair<String, Int>? = withContext(dispatcher) {
         val a = ensure() ?: return@withContext null
         try {
+            a.setPageSegMode(
+                if (singleLine) TessBaseAPI.PageSegMode.PSM_SINGLE_LINE
+                else TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK
+            )
             a.setImage(bmp)
             val text = a.getUTF8Text() ?: ""
             val conf = a.meanConfidence()
             a.clear()
-            Pair(text.trim(), conf)
+            Pair(text, conf)
         } catch (e: Throwable) {
             null
         }
@@ -83,5 +76,57 @@ class TesseractOcr(private val ctx: Context) {
 
     companion object {
         private val LANG_FILES = listOf("heb.traineddata", "eng.traineddata")
+
+        /** Копирует языковые данные из assets во внутреннюю память (один раз). */
+        @Synchronized
+        fun prepareData(ctx: Context): File? {
+            return try {
+                val dir = File(ctx.filesDir, "tesseract")
+                val tessdata = File(dir, "tessdata")
+                tessdata.mkdirs()
+                val versionFile = File(tessdata, "version")
+                val version = ctx.packageManager.getPackageInfo(ctx.packageName, 0).lastUpdateTime.toString()
+                val upToDate = versionFile.exists() && versionFile.readText() == version
+                for (name in LANG_FILES) {
+                    val f = File(tessdata, name)
+                    if (!upToDate || !f.exists() || f.length() == 0L) {
+                        val tmp = File(tessdata, "$name.tmp")
+                        ctx.assets.open("tessdata/$name").use { input ->
+                            tmp.outputStream().use { output -> input.copyTo(output) }
+                        }
+                        f.delete()
+                        tmp.renameTo(f)
+                    }
+                }
+                versionFile.writeText(version)
+                dir
+            } catch (e: Throwable) {
+                null
+            }
+        }
+    }
+}
+
+/** Несколько экземпляров Tesseract — строки распознаются параллельно. */
+class TesseractPool(ctx: Context, size: Int) {
+
+    private val workers = List(size) { TesseractOcr(ctx) }
+    private val free = Channel<TesseractOcr>(size).also { ch -> workers.forEach { ch.trySend(it) } }
+
+    suspend fun warmUp() = coroutineScope {
+        workers.forEach { w -> launch { w.warmUp() } }
+    }
+
+    suspend fun recognize(bmp: Bitmap, singleLine: Boolean): Pair<String, Int>? {
+        val w = free.receive()
+        try {
+            return w.recognize(bmp, singleLine)
+        } finally {
+            free.trySend(w)
+        }
+    }
+
+    fun close() {
+        workers.forEach { it.close() }
     }
 }

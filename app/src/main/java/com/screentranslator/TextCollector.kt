@@ -19,7 +19,12 @@ data class TextBlock(
     val text: String,
     val bounds: Rect,
     val lineHeightPx: Float = 0f,
-    val lineCount: Int = 0
+    val lineCount: Int = 0,
+    /** режим «как Google Объектив»: плашка цвета фона, lineHeightPx = высота букв */
+    val lens: Boolean = false,
+    val bgColor: Int = 0,
+    val fgColor: Int = 0,
+    val rtl: Boolean = false
 )
 
 /** Собирает видимый текст и его координаты из всех окон на экране. */

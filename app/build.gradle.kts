@@ -57,5 +57,5 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
     implementation("com.google.mlkit:translate:17.0.3")
     implementation("com.google.mlkit:text-recognition:16.0.1")
-    implementation("cz.adaptech.tesseract4android:tesseract4android-openmp:4.8.0")
+    implementation("cz.adaptech.tesseract4android:tesseract4android:4.8.0")
 }

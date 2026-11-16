@@ -22,6 +22,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -153,7 +154,13 @@ class ScreenTranslatorService : AccessibilityService(),
         val useOcr = Prefs.ocr(prefs) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
         val online = Prefs.online(prefs)
 
+        if (Prefs.mode(prefs) == 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            lensPress(screen, blocks, online)
+            return
+        }
+
         job = scope.launch {
+            overlay?.dim = true
             // скриншот делаем до показа слоя, чтобы перевод не попал на картинку
             var shot: Bitmap? = null
             if (useOcr && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -201,7 +208,7 @@ class ScreenTranslatorService : AccessibilityService(),
                     var foundAny = sure.isNotEmpty()
                     for (c in unsure.sortedBy { it.bounds.top }) {
                         if (!isActive) break
-                        val text = ocr.readWithTesseract(bmp, c)
+                        val text = ocr.readWithTesseract(bmp, c)?.joinToString(" ")
                             ?: c.latinText.takeIf {
                                 TranslationEngine.sourceLanguage(it) == TranslateLanguage.ENGLISH &&
                                     OcrHelper.looksLikeWords(it)
@@ -216,6 +223,68 @@ class ScreenTranslatorService : AccessibilityService(),
                 } finally {
                     bmp.recycle()
                 }
+            }
+        }
+    }
+
+    /**
+     * Режим «как Google Объектив»: весь текст берётся со снимка экрана,
+     * перевод рисуется поверх каждого блока цветом фона и цветом текста оригинала.
+     */
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
+    private fun lensPress(screen: Rect, nodeBlocks: List<TextBlock>, online: Boolean) {
+        job = scope.launch {
+            val bmp = withTimeoutOrNull(800) { ocr.screenshot(this@ScreenTranslatorService) }
+            val ov = showOverlay(screen)
+            ov.clear()
+            ov.dim = false
+            if (bmp == null) {
+                ov.message = "Не удалось сделать снимок экрана.\nОтпустите и нажмите ещё раз."
+                return@launch
+            }
+            if (!online && !engine.ready) {
+                ov.message = "Офлайн-модели ещё не загружены.\nОткройте приложение и нажмите «Скачать модели» или включите онлайн-перевод."
+            }
+            ov.busy = true
+            val segments = TextMatcher.segments(nodeBlocks)
+            try {
+                val candidates = try {
+                    ocr.detect(bmp)
+                } catch (_: Exception) {
+                    emptyList()
+                }
+                coroutineScope {
+                    for (c in candidates.sortedBy { it.bounds.top }) {
+                        launch {
+                            val lines: List<String> = if (c.confidentLatin) {
+                                c.latinLines
+                            } else {
+                                ocr.readWithTesseract(bmp, c)
+                                    ?: c.latinLines.takeIf {
+                                        val t = c.latinText
+                                        TranslationEngine.sourceLanguage(t) == TranslateLanguage.ENGLISH &&
+                                            OcrHelper.looksLikeWords(t)
+                                    }
+                                    ?: return@launch
+                            }
+                            val text = lines.joinToString(" ") { TextMatcher.correct(it, segments) }.trim()
+                            if (!TranslationEngine.needsTranslation(text)) return@launch
+                            val (bg, fg) = ColorSampler.sample(bmp, c.bounds)
+                            val rtl = text.any { it in '\u0590'..'\u05FF' }
+                            val block = TextBlock(
+                                text, c.bounds, c.lineHeight.toFloat(), c.lineCount,
+                                lens = true, bgColor = bg, fgColor = fg, rtl = rtl
+                            )
+                            val item = ov.addBlocks(listOf(block)).first()
+                            val t = engine.translate(text, online)
+                            if (t != null) ov.setTranslation(item, t)
+                        }
+                    }
+                }
+                if (ov.isEmpty() && ov.message == null) ov.message = "Текст на экране не найден"
+            } finally {
+                ov.busy = false
+                bmp.recycle()
             }
         }
     }

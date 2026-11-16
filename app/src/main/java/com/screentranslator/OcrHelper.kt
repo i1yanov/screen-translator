@@ -16,26 +16,28 @@ import kotlinx.coroutines.tasks.await
 import kotlin.coroutines.resume
 
 /**
- * Текст на картинках:
- *  1) скриншот экрана;
- *  2) ML Kit быстро находит все области с текстом (и сразу читает английский);
- *  3) области, где ML Kit не уверен (иврит и т.п.), дочитывает Tesseract (иврит+английский).
+ * Текст со снимка экрана:
+ *  1) ML Kit быстро находит все блоки текста (и сразу читает английский);
+ *  2) блоки, где ML Kit не уверен (иврит и т.п.), читает Tesseract (иврит+английский).
  */
 class OcrHelper(context: Context) {
 
     class Candidate(
         val bounds: Rect,
-        val latinText: String,
+        val latinLines: List<String>,
+        /** высота строки по рамке букв (ML Kit), px */
         val lineHeight: Int,
         val lineCount: Int,
         val confidentLatin: Boolean
     ) {
-        /** Блок для оверлея. Рамка ML Kit облегает буквы, строка текста примерно на 25% выше. */
+        val latinText: String get() = latinLines.joinToString(" ").trim()
+
+        /** Блок для режима «по элементам». Строка текста примерно на 25% выше рамки букв. */
         fun toBlock(text: String) = TextBlock(text, bounds, lineHeight * 1.25f, lineCount)
     }
 
     private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
-    val tesseract = TesseractOcr(context)
+    val tesseract = TesseractPool(context, 3)
 
     @RequiresApi(Build.VERSION_CODES.R)
     suspend fun screenshot(service: AccessibilityService): Bitmap? =
@@ -68,7 +70,7 @@ class OcrHelper(context: Context) {
             }
         }
 
-    /** Шаг 2: найти области текста. */
+    /** Найти блоки текста. */
     suspend fun detect(bitmap: Bitmap): List<Candidate> {
         val result = recognizer.process(InputImage.fromBitmap(bitmap, 0)).await()
         val out = ArrayList<Candidate>()
@@ -77,29 +79,31 @@ class OcrHelper(context: Context) {
             if (box.width() < 8 || box.height() < 8) continue
             val lines = block.lines
             if (lines.isEmpty()) continue
-            val text = lines.joinToString(" ") { it.text }.trim()
-            val heights = lines.mapNotNull { it.boundingBox?.height() }
-            val lineH = if (heights.isEmpty()) box.height() / lines.size else heights.sorted()[heights.size / 2]
+            val texts = lines.map { it.text.trim() }.filter { it.isNotEmpty() }
+            if (texts.isEmpty()) continue
+            val joined = texts.joinToString(" ")
+            val heights = lines.mapNotNull { it.boundingBox?.height() }.sorted()
+            val lineH = if (heights.isEmpty()) box.height() / lines.size else heights[heights.size / 2]
             val minConf = lines.minOf { it.confidence }
             val confident = minConf >= 0.75f &&
-                TranslationEngine.sourceLanguage(text) == TranslateLanguage.ENGLISH &&
-                looksLikeWords(text)
-            out.add(Candidate(Rect(box), text, lineH.coerceAtLeast(1), lines.size, confident))
+                TranslationEngine.sourceLanguage(joined) == TranslateLanguage.ENGLISH &&
+                looksLikeWords(joined)
+            out.add(Candidate(Rect(box), texts, lineH.coerceAtLeast(1), lines.size, confident))
         }
         return out
     }
 
-    /** Шаг 3: прочитать область через Tesseract. Возвращает текст или null. */
-    suspend fun readWithTesseract(bitmap: Bitmap, c: Candidate): String? {
+    /** Прочитать блок через Tesseract. Возвращает строки или null. */
+    suspend fun readWithTesseract(bitmap: Bitmap, c: Candidate): List<String>? {
         if (bitmap.isRecycled) return null
-        val pad = (c.lineHeight * 0.3f).toInt().coerceAtLeast(4)
+        val pad = (c.lineHeight * 0.35f).toInt().coerceAtLeast(4)
         val r = Rect(c.bounds)
         r.inset(-pad, -pad)
         if (!r.intersect(0, 0, bitmap.width, bitmap.height)) return null
         if (r.width() < 4 || r.height() < 4) return null
 
         var crop = Bitmap.createBitmap(bitmap, r.left, r.top, r.width(), r.height())
-        val scale = (42f / c.lineHeight).coerceIn(1f, 3f)
+        val scale = (40f / c.lineHeight).coerceIn(1f, 3f)
         if (scale > 1.05f) {
             val scaled = Bitmap.createScaledBitmap(
                 crop, (crop.width * scale).toInt(), (crop.height * scale).toInt(), true
@@ -107,11 +111,15 @@ class OcrHelper(context: Context) {
             if (scaled !== crop && crop !== bitmap) crop.recycle()
             crop = scaled
         }
-        val res = tesseract.recognize(crop)
+        val res = tesseract.recognize(crop, c.lineCount <= 1)
         if (crop !== bitmap) crop.recycle()
         if (res == null) return null
-        val (text, conf) = res
-        val clean = text.replace('\n', ' ').replace(Regex("\\s+"), " ").trim()
+        val (raw, conf) = res
+        val lines = raw.split('\n')
+            .map { it.replace(Regex("\\s+"), " ").trim() }
+            .filter { it.isNotEmpty() }
+        if (lines.isEmpty()) return null
+        val clean = lines.joinToString(" ")
         if (clean.length < 2) return null
 
         var letters = 0
@@ -121,10 +129,8 @@ class OcrHelper(context: Context) {
             if (ch in '֐'..'׿') heb++
         }
         if (letters == 0) return null
-        // иврит — берём результат Tesseract
-        if (heb * 2 >= letters && conf >= 35) return clean
-        // английский, если Tesseract уверен
-        if (heb == 0 && conf >= 60) return clean
+        if (heb * 2 >= letters && conf >= 35) return lines       // иврит
+        if (heb == 0 && conf >= 60) return lines                 // английский, если уверен
         return null
     }
 
