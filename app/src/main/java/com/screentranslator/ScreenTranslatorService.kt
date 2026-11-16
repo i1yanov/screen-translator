@@ -192,7 +192,7 @@ class ScreenTranslatorService : AccessibilityService(),
 
                     // английский, который ML Kit прочитал уверенно, — сразу
                     val (sure, unsure) = fresh.partition { it.confidentLatin }
-                    translateItems(ov.addBlocks(sure.map { TextBlock(it.latinText, it.bounds) }))
+                    translateItems(ov.addBlocks(sure.map { it.toBlock(it.latinText) }))
 
                     // остальное (иврит и сомнительное) — через Tesseract, по одному
                     var foundAny = sure.isNotEmpty()
@@ -205,7 +205,7 @@ class ScreenTranslatorService : AccessibilityService(),
                             }
                             ?: continue
                         foundAny = true
-                        translateItems(ov.addBlocks(listOf(TextBlock(text, c.bounds))))
+                        translateItems(ov.addBlocks(listOf(c.toBlock(text))))
                     }
                     if (blocks.isEmpty() && !foundAny) {
                         ov.message = "Текст на экране не найден"

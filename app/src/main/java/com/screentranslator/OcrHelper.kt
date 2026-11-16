@@ -27,8 +27,12 @@ class OcrHelper(context: Context) {
         val bounds: Rect,
         val latinText: String,
         val lineHeight: Int,
+        val lineCount: Int,
         val confidentLatin: Boolean
-    )
+    ) {
+        /** Блок для оверлея. Рамка ML Kit облегает буквы, строка текста примерно на 25% выше. */
+        fun toBlock(text: String) = TextBlock(text, bounds, lineHeight * 1.25f, lineCount)
+    }
 
     private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
     val tesseract = TesseractOcr(context)
@@ -75,12 +79,12 @@ class OcrHelper(context: Context) {
             if (lines.isEmpty()) continue
             val text = lines.joinToString(" ") { it.text }.trim()
             val heights = lines.mapNotNull { it.boundingBox?.height() }
-            val lineH = if (heights.isEmpty()) box.height() else heights.sum() / heights.size
+            val lineH = if (heights.isEmpty()) box.height() / lines.size else heights.sorted()[heights.size / 2]
             val minConf = lines.minOf { it.confidence }
             val confident = minConf >= 0.75f &&
                 TranslationEngine.sourceLanguage(text) == TranslateLanguage.ENGLISH &&
                 looksLikeWords(text)
-            out.add(Candidate(Rect(box), text, lineH.coerceAtLeast(1), confident))
+            out.add(Candidate(Rect(box), text, lineH.coerceAtLeast(1), lines.size, confident))
         }
         return out
     }

@@ -19,6 +19,8 @@ class OverlayView(context: Context) : View(context) {
         var layout: StaticLayout? = null
         var textSize = 0f
         val drawRect = RectF()
+        var textX = 0f
+        var textY = 0f
     }
 
     private val items = ArrayList<Item>()
@@ -59,44 +61,86 @@ class OverlayView(context: Context) : View(context) {
         invalidate()
     }
 
-    private fun layoutItem(item: Item, text: String) {
-        val r = item.block.bounds
-        val pad = (2 * dp).toInt()
-        val screenW = resources.displayMetrics.widthPixels.coerceAtLeast(r.right)
-        var width = r.width() - 2 * pad
-        // слишком узкие подписи (под иконками) немного расширяем
-        val minWidth = (72 * dp).toInt()
-        var left = r.left.toFloat()
-        if (width < minWidth) {
-            val extra = minWidth - width
-            width = minWidth
-            left = (r.left - extra / 2f).coerceIn(0f, (screenW - width - 2 * pad).toFloat().coerceAtLeast(0f))
-        }
-        val availH = (r.height() - 2 * pad).coerceAtLeast((10 * sp).toInt())
+    /** Отношение высоты строки к размеру шрифта (для Roboto ≈ 1.17). */
+    private val lineRatio: Float by lazy {
+        val p = TextPaint(textPaint).apply { textSize = 100f }
+        val fm = p.fontMetrics
+        ((fm.descent - fm.ascent) / 100f).coerceIn(1f, 1.6f)
+    }
 
-        val maxSize = (22 * sp).coerceAtMost(availH * 0.85f).coerceAtLeast(9 * sp)
-        val minSize = 8 * sp
-        var lo = minSize
-        var hi = maxSize
-        var best = build(text, width, minSize)
-        var bestSize = minSize
-        // бинарный поиск наибольшего размера, при котором текст влезает по высоте
-        repeat(8) {
+    /** Размер шрифта оригинала в пикселях. */
+    private fun originalTextSize(b: TextBlock): Float {
+        if (b.lineHeightPx > 0f) {
+            return (b.lineHeightPx / lineRatio).coerceIn(7 * sp, 160 * sp)
+        }
+        // Нет данных о буквах: подбираем размер, при котором оригинал занимает свою рамку
+        val w = b.bounds.width().coerceAtLeast(1)
+        val h = b.bounds.height()
+        var lo = 7 * sp
+        var hi = (h / lineRatio).coerceAtLeast(lo)
+        repeat(10) {
             val mid = (lo + hi) / 2
-            val l = build(text, width, mid)
-            if (l.height <= availH) {
-                best = l; bestSize = mid; lo = mid
-            } else {
-                hi = mid
+            if (build(b.text, w, mid).height <= h) lo = mid else hi = mid
+        }
+        return lo.coerceAtMost(22 * sp)
+    }
+
+    private fun layoutItem(item: Item, text: String) {
+        val b = item.block
+        val r = b.bounds
+        val pad = 2 * dp
+        val screenW = maxOf(width, resources.displayMetrics.widthPixels, r.right)
+        val w0 = r.width().coerceAtLeast(1)
+        val h0 = r.height().toFloat()
+        val s0 = originalTextSize(b)
+
+        var layout: StaticLayout? = null
+        var size = s0
+        var boxW = w0
+        var left = r.left.toFloat()
+
+        // 1) тот же размер и та же рамка; если не влезает — чуть уменьшаем (до 78%)
+        for (f in floatArrayOf(1f, 0.92f, 0.85f, 0.78f)) {
+            val l = build(text, w0, s0 * f)
+            if (l.height <= h0 * 1.12f + 1) {
+                layout = l; size = s0 * f
+                break
             }
         }
-        val big = build(text, width, maxSize)
-        if (big.height <= availH) { best = big; bestSize = maxSize }
 
-        item.layout = best
-        item.textSize = bestSize
-        val h = maxOf(r.height().toFloat(), best.height + 2f * pad)
-        item.drawRect.set(left, r.top.toFloat(), left + width + 2 * pad, r.top + h)
+        // 2) оригинал в одну строку — лучше расширить поле вбок, чем переносить
+        if (layout == null) {
+            val singleLine = b.lineCount == 1 || (b.lineCount == 0 && h0 < 2.2f * s0 * lineRatio)
+            if (singleLine) {
+                val s = s0 * 0.85f
+                textPaint.textSize = s
+                val want = (textPaint.measureText(text) + 2).toInt()
+                val maxW = (screenW - 2 * pad).toInt().coerceAtLeast(w0)
+                val newW = want.coerceIn(w0, maxW)
+                val l = build(text, newW, s)
+                if (l.height <= h0 * 1.35f + 1) {
+                    layout = l; size = s; boxW = newW
+                    left = r.left.toFloat()
+                    if (left + newW > screenW - pad) left = (screenW - pad - newW).coerceAtLeast(pad)
+                }
+            }
+        }
+
+        // 3) иначе — переносим строки и растягиваем поле вниз
+        if (layout == null) {
+            size = s0 * 0.78f
+            layout = build(text, w0, size)
+        }
+
+        val l = layout!!
+        val contentH = maxOf(h0, l.height.toFloat())
+        val top = r.top.toFloat()
+        item.layout = l
+        item.textSize = size
+        item.drawRect.set(left - pad, top - pad, left + boxW + pad, top + contentH + pad)
+        item.textX = left
+        // если перевод ниже оригинала — центрируем по вертикали в его рамке
+        item.textY = top + ((h0 - l.height) / 2f).coerceAtLeast(0f)
     }
 
     private fun build(text: String, width: Int, size: Float): StaticLayout {
@@ -115,14 +159,13 @@ class OverlayView(context: Context) : View(context) {
 
         canvas.save()
         canvas.translate(-loc[0].toFloat(), -loc[1].toFloat())
-        val pad = 2 * dp
         for (item in items) {
             val layout = item.layout ?: continue
             val rect = item.drawRect
             canvas.drawRoundRect(rect, 3 * dp, 3 * dp, bgPaint)
             canvas.drawRoundRect(rect, 3 * dp, 3 * dp, borderPaint)
             canvas.save()
-            canvas.translate(rect.left + pad, rect.top + pad)
+            canvas.translate(item.textX, item.textY)
             textPaint.textSize = item.textSize
             layout.draw(canvas)
             canvas.restore()
