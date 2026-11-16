@@ -35,6 +35,10 @@ class OverlayView(context: Context) : View(context) {
 
     fun isEmpty() = items.isEmpty()
 
+    fun remove(item: Item) {
+        if (items.remove(item)) invalidate()
+    }
+
     private val dp = resources.displayMetrics.density
     private val sp = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 1f, resources.displayMetrics)
 
@@ -247,7 +251,7 @@ class OverlayView(context: Context) : View(context) {
         for (item in items) {
             val layout = item.layout ?: continue
             val rect = item.drawRect
-            if (item.block.lens) {
+            if (item.block.bgColor != 0) {
                 lensBgPaint.color = item.block.bgColor
                 canvas.drawRoundRect(rect, 4 * dp, 4 * dp, lensBgPaint)
                 textPaint.color = item.block.fgColor

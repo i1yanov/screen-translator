@@ -37,7 +37,7 @@ class OcrHelper(context: Context) {
     }
 
     private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
-    val tesseract = TesseractPool(context, 3)
+    val tesseract = TesseractPool(context, 4)
 
     @RequiresApi(Build.VERSION_CODES.R)
     suspend fun screenshot(service: AccessibilityService): Bitmap? =

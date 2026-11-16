@@ -45,6 +45,20 @@ object TextMatcher {
         return if (best != null && bestScore >= 0.6f) best.text else ocrLine
     }
 
+    /** Какая доля распознанной строки встречается в тексте элемента (0..1). */
+    fun containment(ocrLine: String, text: String): Float {
+        val g = bigrams(ocrLine)
+        val n = g.values.sum()
+        if (n < 2) return 1f
+        val t = bigrams(text)
+        var common = 0
+        for ((k, v) in g) {
+            val o = t[k] ?: continue
+            common += minOf(v, o)
+        }
+        return common.toFloat() / n
+    }
+
     private fun bigrams(text: String): Map<String, Int> {
         val norm = StringBuilder()
         for (c in text.lowercase()) if (Character.isLetterOrDigit(c)) norm.append(c)

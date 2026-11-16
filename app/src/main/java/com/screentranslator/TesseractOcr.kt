@@ -2,6 +2,7 @@ package com.screentranslator
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Rect
 import com.googlecode.tesseract.android.TessBaseAPI
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.channels.Channel
@@ -63,6 +64,37 @@ class TesseractOcr(private val ctx: Context) {
         }
     }
 
+    /** Распознать целую область (полосу экрана): строки с рамками. */
+    suspend fun recognizeLines(bmp: Bitmap): List<OcrLine>? = withContext(dispatcher) {
+        val a = ensure() ?: return@withContext null
+        val out = ArrayList<OcrLine>()
+        try {
+            a.setPageSegMode(TessBaseAPI.PageSegMode.PSM_AUTO)
+            a.setImage(bmp)
+            a.getUTF8Text()
+            val it = a.getResultIterator()
+            if (it != null) {
+                val level = TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE
+                it.begin()
+                do {
+                    val t = it.getUTF8Text(level)
+                    val r = it.getBoundingRect(level)
+                    val c = it.confidence(level)
+                    if (t != null && r != null) {
+                        val clean = t.replace(Regex("\\s+"), " ").trim()
+                        if (clean.isNotEmpty()) out.add(OcrLine(clean, Rect(r), c))
+                    }
+                } while (it.next(level))
+                it.delete()
+            }
+            a.clear()
+            out
+        } catch (e: Throwable) {
+            try { a.clear() } catch (_: Throwable) {}
+            out
+        }
+    }
+
     fun close() {
         try {
             dispatcher.executor.execute {
@@ -107,6 +139,8 @@ class TesseractOcr(private val ctx: Context) {
     }
 }
 
+class OcrLine(val text: String, val bounds: Rect, val conf: Float)
+
 /** Несколько экземпляров Tesseract — строки распознаются параллельно. */
 class TesseractPool(ctx: Context, size: Int) {
 
@@ -121,6 +155,15 @@ class TesseractPool(ctx: Context, size: Int) {
         val w = free.receive()
         try {
             return w.recognize(bmp, singleLine)
+        } finally {
+            free.trySend(w)
+        }
+    }
+
+    suspend fun recognizeLines(bmp: Bitmap): List<OcrLine>? {
+        val w = free.receive()
+        try {
+            return w.recognizeLines(bmp)
         } finally {
             free.trySend(w)
         }

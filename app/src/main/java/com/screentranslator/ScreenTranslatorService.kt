@@ -155,7 +155,7 @@ class ScreenTranslatorService : AccessibilityService(),
         val online = Prefs.online(prefs)
 
         if (Prefs.mode(prefs) == 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            lensPress(screen, blocks, online)
+            autoPress(screen, blocks, online)
             return
         }
 
@@ -228,11 +228,13 @@ class ScreenTranslatorService : AccessibilityService(),
     }
 
     /**
-     * Режим «как Google Объектив»: весь текст берётся со снимка экрана,
-     * перевод рисуется поверх каждого блока цветом фона и цветом текста оригинала.
+     * Авто-режим:
+     *  1) текст элементов приложения — сразу, в цветах оригинала;
+     *  2) весь экран распознаётся Tesseract (иврит+английский) — добавляем то, чего нет в элементах,
+     *     и убираем элементы, стоящие не там, где реально их текст (устаревшие координаты).
      */
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
-    private fun lensPress(screen: Rect, nodeBlocks: List<TextBlock>, online: Boolean) {
+    private fun autoPress(screen: Rect, nodeBlocks: List<TextBlock>, online: Boolean) {
         job = scope.launch {
             val bmp = withTimeoutOrNull(800) { ocr.screenshot(this@ScreenTranslatorService) }
             val ov = showOverlay(screen)
@@ -245,39 +247,66 @@ class ScreenTranslatorService : AccessibilityService(),
             if (!online && !engine.ready) {
                 ov.message = "Офлайн-модели ещё не загружены.\nОткройте приложение и нажмите «Скачать модели» или включите онлайн-перевод."
             }
+
+            fun translate(item: OverlayView.Item) {
+                launch {
+                    val t = engine.translate(item.block.text, online)
+                    if (t != null) ov.setTranslation(item, t)
+                }
+            }
+
+            // 1) элементы приложения
+            val elements = ArrayList<OverlayView.Item>()
+            for (b in nodeBlocks) {
+                if (!TranslationEngine.needsTranslation(b.text)) continue
+                if (!hasVisibleContent(bmp, b.bounds)) continue
+                val (bg, fg) = ColorSampler.sample(bmp, b.bounds)
+                val item = ov.addBlocks(listOf(b.copy(bgColor = bg, fgColor = fg))).first()
+                elements.add(item)
+                translate(item)
+            }
+
+            // 2) весь экран через Tesseract
             ov.busy = true
             val segments = TextMatcher.segments(nodeBlocks)
+            val statusBar = (26 * resources.displayMetrics.density).toInt()
+            val strips = ScreenOcr.makeStrips(bmp, 4, statusBar)
             try {
-                val candidates = try {
-                    ocr.detect(bmp)
-                } catch (_: Exception) {
-                    emptyList()
-                }
                 coroutineScope {
-                    for (c in candidates.sortedBy { it.bounds.top }) {
+                    for (strip in strips) {
                         launch {
-                            val lines: List<String> = if (c.confidentLatin) {
-                                c.latinLines
-                            } else {
-                                ocr.readWithTesseract(bmp, c)
-                                    ?: c.latinLines.takeIf {
-                                        val t = c.latinText
-                                        TranslationEngine.sourceLanguage(t) == TranslateLanguage.ENGLISH &&
-                                            OcrHelper.looksLikeWords(t)
-                                    }
-                                    ?: return@launch
+                            // полосы не освобождаем вручную: Tesseract может ещё читать их после отмены
+                            val raw = ocr.tesseract.recognizeLines(strip.bitmap) ?: return@launch
+                            val lines = raw.filter { ScreenOcr.isGood(it) }.map {
+                                OcrLine(it.text, Rect(it.bounds).apply { offset(0, strip.top) }, it.conf)
                             }
-                            val text = lines.joinToString(" ") { TextMatcher.correct(it, segments) }.trim()
-                            if (!TranslationEngine.needsTranslation(text)) return@launch
-                            val (bg, fg) = ColorSampler.sample(bmp, c.bounds)
-                            val rtl = text.any { it in '\u0590'..'\u05FF' }
-                            val block = TextBlock(
-                                text, c.bounds, c.lineHeight.toFloat(), c.lineCount,
-                                lens = true, bgColor = bg, fgColor = fg, rtl = rtl
-                            )
-                            val item = ov.addBlocks(listOf(block)).first()
-                            val t = engine.translate(text, online)
-                            if (t != null) ov.setTranslation(item, t)
+                            val fresh = ArrayList<OcrLine>()
+                            for (line in lines) {
+                                val over = elements.filter { overlapRatio(line.bounds, it.block.bounds) > 0.3f }
+                                if (over.isEmpty()) {
+                                    fresh.add(line)
+                                    continue
+                                }
+                                val matches = over.any { TextMatcher.containment(line.text, it.block.text) >= 0.45f }
+                                if (!matches) {
+                                    // элемент стоит не на своём месте — убираем его, берём распознанное
+                                    for (e in over) {
+                                        ov.remove(e)
+                                        elements.remove(e)
+                                    }
+                                    fresh.add(line)
+                                }
+                            }
+                            for (p in ScreenOcr.group(fresh)) {
+                                val text = p.lines.joinToString(" ") { TextMatcher.correct(it.text, segments) }.trim()
+                                if (!TranslationEngine.needsTranslation(text)) continue
+                                val (bg, fg) = ColorSampler.sample(bmp, p.bounds)
+                                val block = TextBlock(
+                                    text, p.bounds, p.lineHeight.toFloat(), p.lines.size,
+                                    lens = true, bgColor = bg, fgColor = fg, rtl = p.rtl
+                                )
+                                translate(ov.addBlocks(listOf(block)).first())
+                            }
                         }
                     }
                 }
