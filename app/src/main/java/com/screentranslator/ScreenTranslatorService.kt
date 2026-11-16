@@ -177,7 +177,10 @@ class ScreenTranslatorService : AccessibilityService(),
                 }
             }
 
-            translateItems(ov.addBlocks(blocks))
+            // невидимые элементы (прозрачные, скрытые) отсеиваем по снимку экрана:
+            // там, где на самом деле нет текста, картинка однотонная
+            val visibleBlocks = shot?.let { bmp -> blocks.filter { hasVisibleContent(bmp, it.bounds) } } ?: blocks
+            translateItems(ov.addBlocks(visibleBlocks))
 
             val bmp = shot ?: return@launch
             launch {
@@ -207,7 +210,7 @@ class ScreenTranslatorService : AccessibilityService(),
                         foundAny = true
                         translateItems(ov.addBlocks(listOf(c.toBlock(text))))
                     }
-                    if (blocks.isEmpty() && !foundAny) {
+                    if (visibleBlocks.isEmpty() && !foundAny) {
                         ov.message = "Текст на экране не найден"
                     }
                 } finally {
@@ -266,6 +269,30 @@ class ScreenTranslatorService : AccessibilityService(),
             wm.defaultDisplay.getRealMetrics(dm)
             Rect(0, 0, dm.widthPixels, dm.heightPixels)
         }
+    }
+
+    /** Есть ли в области что-то кроме однотонного фона. */
+    private fun hasVisibleContent(bmp: Bitmap, r: Rect): Boolean {
+        val box = Rect(r)
+        if (!box.intersect(0, 0, bmp.width, bmp.height)) return false
+        if (box.width() < 3 || box.height() < 3) return false
+        val step = maxOf(1, minOf(box.width(), box.height()) / 12)
+        val lum = ArrayList<Int>()
+        var y = box.top
+        while (y < box.bottom) {
+            var x = box.left
+            while (x < box.right) {
+                val c = bmp.getPixel(x, y)
+                lum.add((Color.red(c) * 30 + Color.green(c) * 59 + Color.blue(c) * 11) / 100)
+                x += step
+            }
+            y += step
+        }
+        if (lum.size < 4) return true
+        val sorted = lum.sorted()
+        val median = sorted[sorted.size / 2]
+        val differing = lum.count { kotlin.math.abs(it - median) > 40 }
+        return differing >= 3 && differing * 100 >= lum.size * 2
     }
 
     private fun overlapRatio(a: Rect, b: Rect): Float {

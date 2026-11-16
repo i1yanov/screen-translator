@@ -47,31 +47,27 @@ object TextCollector {
 
         for (root in roots) {
             if (root.packageName?.toString() == ownPackage) continue
-            walk(root, out, screen, 0)
+            walk(service, root, out, screen, 0)
         }
         return dedupe(out)
     }
 
-    private fun walk(node: AccessibilityNodeInfo?, out: MutableList<TextBlock>, screen: Rect, depth: Int) {
+    private fun walk(service: AccessibilityService, node: AccessibilityNodeInfo?, out: MutableList<TextBlock>, screen: Rect, depth: Int) {
         if (node == null || depth > 80) return
         if (!node.isVisibleToUser) return
 
-        val realText = node.text?.toString()?.takeIf { it.isNotBlank() }
-        val text = realText
-            ?: if (node.childCount == 0) node.contentDescription?.toString()?.takeIf { it.isNotBlank() } else null
+        // contentDescription (подписи иконок для незрячих) не берём — на экране этого текста нет
+        val text = node.text?.toString()?.takeIf { it.isNotBlank() }
 
         if (text != null) {
             val r = Rect()
             node.getBoundsInScreen(r)
             if (r.width() > 4 && r.height() > 4 && r.intersect(screen)) {
-                val measured = if (realText != null) measure(node, realText, r) else null
-                out.add(
-                    measured ?: TextBlock(text.trim(), r)
-                )
+                out.add(measure(service, node, text, r) ?: TextBlock(text.trim(), r))
             }
         }
         for (i in 0 until node.childCount) {
-            walk(node.getChild(i), out, screen, depth + 1)
+            walk(service, node.getChild(i), out, screen, depth + 1)
         }
     }
 
@@ -79,7 +75,7 @@ object TextCollector {
      * Просим у приложения координаты каждой буквы — так узнаём точное место текста
      * и реальную высоту строки (то есть размер шрифта).
      */
-    private fun measure(node: AccessibilityNodeInfo, text: String, nodeBounds: Rect): TextBlock? {
+    private fun measure(service: AccessibilityService, node: AccessibilityNodeInfo, text: String, nodeBounds: Rect): TextBlock? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return null
         return try {
             val key = AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_KEY
@@ -92,11 +88,28 @@ object TextCollector {
             if (!node.refreshWithExtraData(key, args)) return null
             @Suppress("DEPRECATION")
             val arr = node.extras.getParcelableArray(key) ?: return null
-            val rects = arr.mapNotNull { it as? RectF }.filter { it.width() > 0.5f && it.height() > 0.5f }
-            if (rects.isEmpty()) return null
+            val all = arr.mapNotNull { it as? RectF }.filter { it.width() > 0.5f && it.height() > 0.5f }
+            if (all.isEmpty()) return null
+
+            // буквы должны лежать внутри элемента (с запасом)
+            val slackX = nodeBounds.width() * 0.2f
+            val slackY = nodeBounds.height() * 0.2f
+            val area = RectF(
+                nodeBounds.left - slackX, nodeBounds.top - slackY,
+                nodeBounds.right + slackX, nodeBounds.bottom + slackY
+            )
+            val rects = all.filter { area.contains(it) }
+            if (rects.size * 2 < all.size) return null
 
             val heights = rects.map { it.height() }.sorted()
+            val widths = rects.map { it.width() }.sorted()
             val lineH = heights[heights.size / 2]
+            val charW = widths[widths.size / 2]
+            val density = service.resources.displayMetrics.density
+            // отсекаем явно неверные данные (например, «буква» размером с весь блок)
+            if (lineH > nodeBounds.height() * 1.25f) return null
+            if (lineH > 160 * density) return null
+            if (rects.size >= 3 && lineH > charW * 4.5f) return null
 
             // число строк — по разным «верхам» букв
             val tops = ArrayList<Float>()
@@ -115,6 +128,7 @@ object TextCollector {
             }
             if (!tight.intersect(nodeBounds)) return null
             if (tight.width() < 2 || tight.height() < 2) return null
+            if (tops.size * lineH > tight.height() * 1.6f + lineH) return null
 
             TextBlock(text.trim(), tight, lineH, tops.size)
         } catch (e: Exception) {

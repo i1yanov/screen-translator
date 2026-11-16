@@ -70,8 +70,11 @@ class OverlayView(context: Context) : View(context) {
 
     /** Размер шрифта оригинала в пикселях. */
     private fun originalTextSize(b: TextBlock): Float {
+        val screenW = maxOf(width, resources.displayMetrics.widthPixels)
+        // шрифт не может быть выше своей строки/рамки и не больше ~1/10 ширины экрана
+        val cap = minOf(screenW / 10f, b.bounds.height() / lineRatio * 1.1f).coerceAtLeast(7 * sp)
         if (b.lineHeightPx > 0f) {
-            return (b.lineHeightPx / lineRatio).coerceIn(7 * sp, 160 * sp)
+            return (b.lineHeightPx / lineRatio).coerceIn(7 * sp, cap)
         }
         // Нет данных о буквах: подбираем размер, при котором оригинал занимает свою рамку
         val w = b.bounds.width().coerceAtLeast(1)
@@ -82,7 +85,7 @@ class OverlayView(context: Context) : View(context) {
             val mid = (lo + hi) / 2
             if (build(b.text, w, mid).height <= h) lo = mid else hi = mid
         }
-        return lo.coerceAtMost(22 * sp)
+        return lo.coerceAtMost(minOf(22 * sp, cap))
     }
 
     private fun layoutItem(item: Item, text: String) {
@@ -132,15 +135,35 @@ class OverlayView(context: Context) : View(context) {
             layout = build(text, w0, size)
         }
 
-        val l = layout!!
-        val contentH = maxOf(h0, l.height.toFloat())
-        val top = r.top.toFloat()
+        var l = layout!!
+        var top = r.top.toFloat()
+        var contentH = maxOf(h0, l.height.toFloat())
+
+        // Точного места букв нет (рамка = весь элемент, бывает с карточку):
+        // ужимаем плашку до самого текста — по центру по высоте, для иврита справа
+        if (b.lineHeightPx <= 0f) {
+            var textW = 0f
+            for (i in 0 until l.lineCount) textW = maxOf(textW, l.getLineWidth(i))
+            val tw = (textW + 2).toInt().coerceAtMost(boxW)
+            if (tw < boxW * 0.9f) {
+                val rtl = TranslationEngine.sourceLanguage(b.text) == com.google.mlkit.nl.translate.TranslateLanguage.HEBREW
+                if (rtl) left += (boxW - tw)
+                boxW = tw
+                l = build(text, boxW, size)
+            }
+            if (h0 > l.height * 1.5f) {
+                top += (h0 - l.height) / 2f
+                contentH = l.height.toFloat()
+            }
+        }
+
+        val hShown = maxOf(contentH, l.height.toFloat())
         item.layout = l
         item.textSize = size
-        item.drawRect.set(left - pad, top - pad, left + boxW + pad, top + contentH + pad)
+        item.drawRect.set(left - pad, top - pad, left + boxW + pad, top + hShown + pad)
         item.textX = left
         // если перевод ниже оригинала — центрируем по вертикали в его рамке
-        item.textY = top + ((h0 - l.height) / 2f).coerceAtLeast(0f)
+        item.textY = top + ((hShown - l.height) / 2f).coerceAtLeast(0f)
     }
 
     private fun build(text: String, width: Int, size: Float): StaticLayout {
