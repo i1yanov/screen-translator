@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Переводчик экрана</string>
+    <string name="service_label">Переводчик экрана</string>
+    <string name="service_description">Пока вы держите палец в выбранном углу экрана, показывает перевод всего текста на экране на русский язык (с английского и иврита). Перевод выполняется на устройстве, текст никуда не отправляется.</string>
+</resources>
